@@ -1,6 +1,6 @@
 # Localstack con menú interactivo Powershell
 
-Este repositorio contiene un script de PowerShell para gestionar un entorno LocalStack con un menú interactivo. Permite iniciar LocalStack, crear colas SQS (estándar o FIFO), enviar mensajes JSON (por ejemplo, para probar el microservicio ms-discount), listar colas existentes y realizar limpieza. El script incluye gestión de contenedores Docker, verificación de puertos y pruebas de conectividad.
+Este repositorio contiene un script de PowerShell para gestionar un entorno LocalStack con un menú interactivo. Permite iniciar LocalStack, crear colas SQS (estándar o FIFO), enviar mensajes JSON, listar colas existentes y realizar limpieza. El script incluye gestión de contenedores Docker, verificación de puertos y pruebas de conectividad.
 
 ## Características
 - Iniciar y limpiar contenedores LocalStack
