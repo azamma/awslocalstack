@@ -1,6 +1,3 @@
-# Script LocalStack con Menu Interactivo
-# Este script inicia LocalStack y ofrece un menu para gestionar colas SQS
-
 $ContainerName = "localstack-test"
 $Global:CreatedQueues = @()  # Array para almacenar colas creadas
 
@@ -39,11 +36,11 @@ else {
 Write-Host "4. Descargando imagen LocalStack..." -ForegroundColor Yellow
 docker pull localstack/localstack:latest
 
-# 5. Iniciar LocalStack con logs en background
-Write-Host "5. Iniciando LocalStack..." -ForegroundColor Yellow
+# 5. Iniciar LocalStack con LEGACY_SQS_BEHAVIOR
+Write-Host "5. Iniciando LocalStack con LEGACY_SQS_BEHAVIOR..." -ForegroundColor Yellow
 $job = Start-Job -Name "LocalStackJob" -ScriptBlock {
     param($name)
-    docker run --rm --name $name -p 4566:4566 -e SERVICES=sqs -e DEBUG=1 localstack/localstack:latest
+    docker run --rm --name $name -p 4566:4566 -e SERVICES=sqs -e DEBUG=1 -e LEGACY_SQS_BEHAVIOR=1 localstack/localstack:latest
 } -ArgumentList $ContainerName
 
 # Esperar un poco para que inicie
@@ -101,9 +98,28 @@ catch {
     Write-Host "awslocal instalado" -ForegroundColor Green
 }
 
-Write-Host ""
-Write-Host "=== LocalStack iniciado y listo para usar ===" -ForegroundColor Green
-Write-Host ""
+# 9. Configurar credenciales AWS básicas
+Write-Host "9. Configurando credenciales AWS básicas..." -ForegroundColor Yellow
+try {
+    $currentAccessKey = awslocal configure get aws_access_key_id --profile localstack 2>$null
+    if (-not $currentAccessKey) {
+        awslocal configure set aws_access_key_id test --profile localstack
+        awslocal configure set aws_secret_access_key test --profile localstack
+        awslocal configure set aws_default_region us-east-1 --profile localstack
+        Write-Host "Credenciales dummy configuradas exitosamente para perfil localstack" -ForegroundColor Green
+    }
+    else {
+        Write-Host "Credenciales ya configuradas para perfil localstack" -ForegroundColor Green
+    }
+}
+catch {
+    Write-Host "Error configurando credenciales: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Configurando credenciales dummy manualmente para perfil localstack..." -ForegroundColor Yellow
+    awslocal configure set aws_access_key_id test --profile localstack
+    awslocal configure set aws_secret_access_key test --profile localstack
+    awslocal configure set aws_default_region us-east-1 --profile localstack
+    Write-Host "Credenciales dummy configuradas exitosamente para perfil localstack" -ForegroundColor Green
+}
 
 # Funcion para mostrar menu
 function Show-Menu {
@@ -139,7 +155,7 @@ function New-SQSQueue {
         }
         
         try {
-            $result = awslocal sqs create-queue --queue-name $queueName --attributes FifoQueue=true | ConvertFrom-Json
+            $result = awslocal sqs create-queue --queue-name $queueName --attributes FifoQueue=true --region us-east-1 --profile localstack | ConvertFrom-Json
             $queueUrl = $result.QueueUrl
             $Global:CreatedQueues += @{Name = $queueName; Url = $queueUrl; Type = "FIFO"}
             Write-Host "Cola FIFO creada exitosamente:" -ForegroundColor Green
@@ -152,7 +168,7 @@ function New-SQSQueue {
     }
     else {
         try {
-            $result = awslocal sqs create-queue --queue-name $queueName | ConvertFrom-Json
+            $result = awslocal sqs create-queue --queue-name $queueName --region us-east-1 --profile localstack | ConvertFrom-Json
             $queueUrl = $result.QueueUrl
             $Global:CreatedQueues += @{Name = $queueName; Url = $queueUrl; Type = "Standard"}
             Write-Host "Cola Standard creada exitosamente:" -ForegroundColor Green
@@ -207,17 +223,18 @@ function Send-SQSMessage {
         }
         catch {
             Write-Host "El mensaje no es un JSON valido: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "Ejemplo de JSON valido: {`"hola`":`"hola`"}" -ForegroundColor Yellow
             return
         }
         
-        # Escapar el mensaje JSON para asegurar que se envíe como cadena literal
-        $escapedMessage = $message -replace '"', '\"'
-        $quotedMessage = "`"$escapedMessage`""
+        Write-Host "Mensaje JSON a enviar:" -ForegroundColor Cyan
+        Write-Host "  $message" -ForegroundColor White
         
-        # Definir los atributos del mensaje en una variable
-        $messageAttributes = '{"ContentType":{"DataType":"String","StringValue":"application/json"}}'
-        $escapedMessageAttributes = $messageAttributes -replace '"', '\"'
-        $quotedMessageAttributes = "`"$escapedMessageAttributes`""
+        $parameters = @{
+            "Action" = "SendMessage"
+            "MessageBody" = $message
+            "Version" = "2012-11-05"
+        }
         
         if ($selectedQueue.Type -eq "FIFO") {
             $groupId = Read-Host "Ingresa el Message Group ID [default-group]"
@@ -225,68 +242,53 @@ function Send-SQSMessage {
             
             $dedupId = "msg-$(Get-Date -Format 'yyyyMMddHHmmss')-$((Get-Random -Maximum 9999))"
             
-            # Enviar el mensaje JSON con comillas adicionales y atributo ContentType
-            awslocal sqs send-message --queue-url $selectedQueue.Url --message-body $quotedMessage --message-group-id $groupId --message-deduplication-id $dedupId --message-attributes $quotedMessageAttributes | Out-Null
-            
-            # Agregar un pequeno retraso para asegurar que el mensaje este disponible
-            Start-Sleep -Seconds 2
-            
-            # Verificar el mensaje enviado
-            Write-Host "Verificando mensaje enviado..." -ForegroundColor Yellow
-            $receivedMessage = awslocal sqs receive-message --queue-url $selectedQueue.Url --max-number-of-messages 1 --wait-time-seconds 5 --attribute-names All --message-attribute-names All | ConvertFrom-Json
-            if ($receivedMessage.Messages) {
-                $body = $receivedMessage.Messages[0].Body
-                Write-Host "Mensaje recibido de la cola: $body" -ForegroundColor White
-                try {
-                    $null = $body | ConvertFrom-Json -ErrorAction Stop
-                    Write-Host "El mensaje en la cola es un JSON valido" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "El mensaje en la cola NO es un JSON valido: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-            else {
-                Write-Host "No se recibio ningun mensaje de la cola despues de esperar" -ForegroundColor Red
-                Write-Host "Intenta leer el mensaje manualmente con este comando:" -ForegroundColor Yellow
-                Write-Host "awslocal sqs receive-message --queue-url $selectedQueue.Url --max-number-of-messages 1 --wait-time-seconds 10" -ForegroundColor White
-            }
-            
-            Write-Host "Mensaje enviado exitosamente a cola FIFO:" -ForegroundColor Green
+            $parameters["MessageGroupId"] = $groupId
+            $parameters["MessageDeduplicationId"] = $dedupId
+        }
+        
+        $uri = $selectedQueue.Url
+        $result = Invoke-RestMethod -Method Post -Uri $uri -Body $parameters -ContentType "application/x-www-form-urlencoded"
+        
+        if ($result) {
+            Write-Host "Mensaje enviado exitosamente:" -ForegroundColor Green
             Write-Host "  Cola: $($selectedQueue.Name)" -ForegroundColor White
-            Write-Host "  Grupo: $groupId" -ForegroundColor White
-            Write-Host "  ID Dedup: $dedupId" -ForegroundColor White
+            if ($selectedQueue.Type -eq "FIFO") {
+                Write-Host "  Grupo: $groupId" -ForegroundColor White
+                Write-Host "  ID Dedup: $dedupId" -ForegroundColor White
+            }
             Write-Host "  Mensaje: $message" -ForegroundColor White
+        } else {
+            Write-Host "Error enviando mensaje" -ForegroundColor Red
+            return
+        }
+        
+        # Verificar el mensaje enviado directamente en la cola
+        Write-Host ""
+        Write-Host "Verificando mensaje en la cola..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
+        
+        $receivedMessage = awslocal sqs receive-message --queue-url $selectedQueue.Url --max-number-of-messages 1 --wait-time-seconds 5 --region us-east-1 --profile localstack | ConvertFrom-Json
+        if ($receivedMessage.Messages) {
+            $body = $receivedMessage.Messages[0].Body
+            Write-Host "Mensaje recibido en la cola:" -ForegroundColor Cyan
+            Write-Host "  $body" -ForegroundColor White
+            
+            # Comparar con el mensaje enviado
+            if ($body -eq $message) {
+                Write-Host "El mensaje recibido coincide con el enviado" -ForegroundColor Green
+            } else {
+                Write-Host "ADVERTENCIA: El mensaje recibido ($body) no coincide con el enviado ($message)" -ForegroundColor Yellow
+            }
+            
+            # Eliminar el mensaje de prueba
+            $receiptHandle = $receivedMessage.Messages[0].ReceiptHandle
+            awslocal sqs delete-message --queue-url $selectedQueue.Url --receipt-handle $receiptHandle --region us-east-1 --profile localstack | Out-Null
+            Write-Host "Mensaje de prueba eliminado de la cola" -ForegroundColor Gray
         }
         else {
-            # Enviar el mensaje JSON con comillas adicionales y atributo ContentType
-            awslocal sqs send-message --queue-url $selectedQueue.Url --message-body $quotedMessage --message-attributes $quotedMessageAttributes | Out-Null
-            
-            # Agregar un pequeno retraso para asegurar que el mensaje este disponible
-            Start-Sleep -Seconds 2
-            
-            # Verificar el mensaje enviado
-            Write-Host "Verificando mensaje enviado..." -ForegroundColor Yellow
-            $receivedMessage = awslocal sqs receive-message --queue-url $selectedQueue.Url --max-number-of-messages 1 --wait-time-seconds 5 --attribute-names All --message-attribute-names All | ConvertFrom-Json
-            if ($receivedMessage.Messages) {
-                $body = $receivedMessage.Messages[0].Body
-                Write-Host "Mensaje recibido de la cola: $body" -ForegroundColor White
-                try {
-                    $null = $body | ConvertFrom-Json -ErrorAction Stop
-                    Write-Host "El mensaje en la cola es un JSON valido" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "El mensaje en la cola NO es un JSON valido: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-            else {
-                Write-Host "No se recibio ningun mensaje de la cola despues de esperar" -ForegroundColor Red
-                Write-Host "Si aun no se consumio, intenta leer el mensaje manualmente con este comando:" -ForegroundColor Yellow
-                Write-Host "awslocal sqs receive-message --queue-url $selectedQueue.Url --max-number-of-messages 1 --wait-time-seconds 10" -ForegroundColor White
-            }
-            
-            Write-Host "Mensaje enviado exitosamente a cola Standard:" -ForegroundColor Green
-            Write-Host "  Cola: $($selectedQueue.Name)" -ForegroundColor White
-            Write-Host "  Mensaje: $message" -ForegroundColor White
+            Write-Host "No se pudo recibir el mensaje de verificacion" -ForegroundColor Yellow
+            Write-Host "Puedes verificar manualmente con:" -ForegroundColor Gray
+            Write-Host "  awslocal sqs receive-message --queue-url $($selectedQueue.Url) --region us-east-1 --profile localstack" -ForegroundColor White
         }
     }
     catch {
@@ -315,7 +317,7 @@ function Show-ExistingQueues {
     try {
         Write-Host ""
         Write-Host "Todas las colas en LocalStack:" -ForegroundColor Cyan
-        $allQueues = awslocal sqs list-queues | ConvertFrom-Json
+        $allQueues = awslocal sqs list-queues --region us-east-1 --profile localstack | ConvertFrom-Json
         if ($allQueues.QueueUrls) {
             $allQueues.QueueUrls | ForEach-Object {
                 $queueName = ($_ -split '/')[-1]
@@ -342,7 +344,7 @@ function Cleanup-LocalStack {
         Write-Host "Eliminando colas creadas..." -ForegroundColor Yellow
         foreach ($queue in $Global:CreatedQueues) {
             try {
-                awslocal sqs delete-queue --queue-url $queue.Url 2>$null | Out-Null
+                awslocal sqs delete-queue --queue-url $queue.Url --region us-east-1 --profile localstack 2>$null | Out-Null
                 Write-Host "  Cola eliminada: $($queue.Name)" -ForegroundColor Green
             }
             catch {
